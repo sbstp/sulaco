@@ -81,29 +81,39 @@ async fn listen_sigchld(sender: mpsc::Sender<Termination>) {
     let mut signals = signal(SignalKind::child()).expect("could not create SIGCHLD signal handler");
 
     while signals.recv().await.is_some() {
-        let mut status = 0;
-        let pid = unsafe { libc::waitpid(-1, &mut status, 0) };
-        if pid < 0 {
-            eprintln!("waitpid error: {:?}", std::io::Error::last_os_error());
-        } else {
-            let term = if libc::WIFEXITED(status) {
-                let code = libc::WEXITSTATUS(status);
-                Termination::Exited {
-                    pid: pid as u32,
-                    code,
-                }
-            } else if libc::WIFSIGNALED(status) {
-                let signal = libc::WTERMSIG(status);
-                Termination::Signaled {
-                    pid: pid as u32,
-                    signal,
-                }
-            } else {
-                continue;
-            };
-
-            if sender.send(term).await.is_err() {
+        // WNOHANG makes the call to waitpid nonblocking. When we receive a
+        // SIGCHLD signal, we call waitpid multiple times because it's possible
+        // that multiple children have exited for a single signal reception.
+        // We stop looking for exited children when waitpid returns an error
+        // or 0, signaling it would hang.
+        loop {
+            let mut status = 0;
+            let pid = unsafe { libc::waitpid(-1, &mut status, libc::WNOHANG) };
+            if pid <= 0 {
                 break;
+            } else {
+                let mut term = None;
+
+                if libc::WIFEXITED(status) {
+                    let code = libc::WEXITSTATUS(status);
+                    term = Some(Termination::Exited {
+                        pid: pid as u32,
+                        code,
+                    })
+                }
+                if libc::WIFSIGNALED(status) {
+                    let signal = libc::WTERMSIG(status);
+                    term = Some(Termination::Signaled {
+                        pid: pid as u32,
+                        signal,
+                    })
+                }
+
+                if let Some(term) = term {
+                    if sender.send(term).await.is_err() {
+                        return;
+                    }
+                }
             }
         }
     }
