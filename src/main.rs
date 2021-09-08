@@ -1,4 +1,7 @@
-use tokio::io::AsyncBufReadExt;
+use std::collections::BTreeMap;
+
+use tokio::io::{AsyncBufReadExt, AsyncRead};
+use tokio::process;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
@@ -17,6 +20,63 @@ impl Termination {
     }
 }
 
+pub enum StdStream {
+    Stdout,
+    Stderr,
+}
+
+pub struct ProcessSpec {
+    pub cmd: String,
+    pub args: Vec<String>,
+}
+
+impl ProcessSpec {
+    async fn stream_stdio(tag: &str, reader: impl AsyncRead + Unpin, stream: StdStream) {
+        let br = tokio::io::BufReader::new(reader);
+        let mut lines = br.lines();
+        while let Ok(Some(line)) = lines.next_line().await {
+            match stream {
+                StdStream::Stdout => println!("[{}] {}", tag, line),
+                StdStream::Stderr => eprintln!("[{}] {}", tag, line),
+            }
+        }
+    }
+
+    pub fn spawn<T>(&self, token: T) -> anyhow::Result<RunningProcess<T>> {
+        let mut child = tokio::process::Command::new(&self.cmd)
+            .args(&self.args)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .kill_on_drop(false)
+            .spawn()?;
+
+        let stdout = child.stdout.take().expect("stdout not piped");
+        let stderr = child.stderr.take().expect("stderr not piped");
+
+        tokio::spawn(Self::stream_stdio("echo", stdout, StdStream::Stdout));
+        tokio::spawn(Self::stream_stdio("echo", stderr, StdStream::Stderr));
+
+        let pid = child.id().expect("child has no pid");
+        Ok(RunningProcess {
+            handle: child,
+            pid,
+            token,
+        })
+    }
+}
+
+pub struct RunningProcess<T> {
+    pub handle: process::Child,
+    pub pid: u32,
+    pub token: T,
+}
+
+// Listen to the SIGCHLD signal and call waitpid when the signal is received.
+// After that the termination event, if any, is sent through the channel.
+// The waitpid function will both reap zombies and catch termination of children
+// processes. Events referring to zombies can be ignored but events tied to a
+// child process we know might need to be handled, for instance restarting
+// a killed child process or failed child process.
 async fn listen_sigchld(sender: mpsc::Sender<Termination>) {
     let mut signals = signal(SignalKind::child()).expect("could not create SIGCHLD signal handler");
 
@@ -49,29 +109,86 @@ async fn listen_sigchld(sender: mpsc::Sender<Termination>) {
     }
 }
 
+pub struct AppState {
+    specs: Vec<ProcessSpec>,
+    ptable: BTreeMap<u32, RunningProcess<usize>>,
+    shutdown: bool,
+}
+
+impl AppState {
+    pub fn init(&mut self) {
+        for (token, spec) in self.specs.iter().enumerate() {
+            match spec.spawn(token) {
+                Ok(proc) => {
+                    self.ptable.insert(proc.pid, proc);
+                }
+                Err(err) => {
+                    eprintln!("[~sulaco] could not spawn process '{}': {}", spec.cmd, err);
+                }
+            }
+        }
+    }
+
+    pub fn shutdown(&mut self) {
+        self.shutdown = true;
+    }
+
+    pub async fn terminated(&mut self, term: Termination) {
+        if let Some(proc) = self.ptable.remove(&term.pid()) {
+            if !self.shutdown {
+                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                let spec = &self.specs[proc.token];
+                let proc = spec.spawn(proc.token).unwrap();
+                self.ptable.insert(proc.pid, proc);
+            }
+        }
+    }
+
+    pub fn should_exit(&self) -> bool {
+        self.shutdown && self.ptable.is_empty()
+    }
+}
+
 #[tokio::main(flavor = "current_thread")]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> anyhow::Result<()> {
     let (sendr, mut recvr) = tokio::sync::mpsc::channel(8);
     tokio::spawn(listen_sigchld(sendr));
 
-    let mut child = tokio::process::Command::new("echo")
-        .arg("--wtfedef")
-        .arg("hello")
-        .stdout(std::process::Stdio::piped())
-        .spawn()?;
-    let stdout = child.stdout.take().unwrap();
+    let mut sigint = signal(SignalKind::interrupt()).unwrap();
+    let mut sigterm = signal(SignalKind::terminate()).unwrap();
 
-    tokio::spawn(async move {
-        let br = tokio::io::BufReader::new(stdout);
-        let mut lines = br.lines();
-        while let Ok(Some(line)) = lines.next_line().await {
-            println!("[out] {}", line);
-        }
-    });
+    let spec = ProcessSpec {
+        cmd: "echo".into(),
+        args: vec!["hello world!".into()],
+    };
 
-    while let Some(term) = recvr.recv().await {
-        println!("[done] {:?}", term);
-        if term.pid() == child.id().unwrap() {
+    let mut state = AppState {
+        specs: vec![spec],
+        ptable: BTreeMap::new(),
+        shutdown: false,
+    };
+
+    state.init();
+
+    loop {
+        tokio::select! {
+            _ = sigint.recv() => {
+                println!("[~sulaco] SIGINT received, shutting down");
+                state.shutdown();
+            }
+            _ = sigterm.recv() => {
+                println!("[~sulaco] SIGTERM received, shutting down");
+                state.shutdown();
+            }
+            term = recvr.recv() => {
+                if let Some(term) = term {
+                    println!("[~sulaco] process terminated {:?}", term.pid());
+                    state.terminated(term).await;
+                }
+            }
+        };
+
+        if state.should_exit() {
             break;
         }
     }
