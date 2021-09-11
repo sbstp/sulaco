@@ -1,0 +1,4 @@
+services:
+  echoer:
+    cmd: sleep
+    args: ["30"]
