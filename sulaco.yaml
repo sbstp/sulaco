@@ -1,4 +1,8 @@
 services:
   echoer:
     cmd: sleep
-    args: ["30"]
+    args: ["5"]
+  echoer2:
+    cmd: echo
+    args: [hello, world, "!!!"]
+    restart: false

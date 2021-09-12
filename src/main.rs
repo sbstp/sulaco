@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -8,28 +9,17 @@ use tokio::process;
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
 
+use unix::Termination;
+
 mod spec;
-
-#[derive(Debug)]
-pub enum Termination {
-    Exited { pid: u32, code: i32 },
-    Signaled { pid: u32, signal: i32 },
-}
-
-impl Termination {
-    pub fn pid(&self) -> u32 {
-        match *self {
-            Termination::Exited { pid, .. } => pid,
-            Termination::Signaled { pid, .. } => pid,
-        }
-    }
-}
+mod unix;
 
 #[derive(Debug)]
 pub enum Event {
     TermSignal,
+    ServiceRestart { name: Arc<String> },
     ServiceTerminated(Termination),
-    ServiceForceShutdown(u32),
+    ServiceForceShutdown { pid: u32, instance_id: u64 },
 }
 
 pub enum StdStream {
@@ -41,6 +31,7 @@ pub struct RunningService {
     pub name: Arc<String>,
     pub handle: process::Child,
     pub pid: u32,
+    pub instance_id: u64,
     sender: mpsc::Sender<Event>,
 }
 
@@ -56,7 +47,7 @@ impl RunningService {
         cmd.stderr(std::process::Stdio::piped());
         unsafe {
             cmd.pre_exec(|| {
-                let _ = nix::unistd::setpgid(nix::unistd::Pid::from_raw(0), nix::unistd::Pid::from_raw(0));
+                unix::new_process_group();
                 Ok(())
             });
         };
@@ -70,12 +61,19 @@ impl RunningService {
         tokio::spawn(Self::stream_stdio(name.clone(), stderr, StdStream::Stderr));
 
         let pid = child.id().expect("child has no pid");
+
         Ok(RunningService {
             name: name.clone(),
             handle: child,
             pid,
+            instance_id: Self::next_instance_id(),
             sender,
         })
+    }
+
+    fn next_instance_id() -> u64 {
+        static INSTANCE_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+        INSTANCE_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
     }
 
     async fn stream_stdio(tag: Arc<String>, reader: impl AsyncRead + Unpin, stream: StdStream) {
@@ -89,21 +87,22 @@ impl RunningService {
         }
     }
 
-    pub fn terminate(&self, timeout: Duration) {
-        eprintln!("[~sulaco] sending SIGTERM to {} (pid={})", self.name, self.pid);
-        //let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.pid as i32), nix::sys::signal::SIGTERM);
+    pub fn terminate(&self, timeout: Duration, stop_signal: unix::Signal) {
+        eprintln!("[~sulaco] sending {} to {} (pid={})", stop_signal, self.name, self.pid);
+        unix::kill(self.pid, stop_signal);
 
         let sender = self.sender.clone();
         let pid = self.pid;
+        let instance_id = self.instance_id;
         tokio::spawn(async move {
             tokio::time::sleep(timeout).await;
-            let _ = sender.send(Event::ServiceForceShutdown(pid)).await;
+            let _ = sender.send(Event::ServiceForceShutdown { pid, instance_id }).await;
         });
     }
 
     pub fn force_terminate(&self) {
         eprintln!("[~sulaco] sending SIGKILL to {} (pid={})", self.name, self.pid);
-        let _ = nix::sys::signal::kill(nix::unistd::Pid::from_raw(self.pid as i32), nix::sys::signal::SIGKILL);
+        unix::kill(self.pid, unix::Signal::Sigkill);
     }
 }
 
@@ -128,25 +127,44 @@ impl AppState {
         }
     }
 
+    pub fn start_service(&mut self, name: &Arc<String>) {
+        let spec = &self.conf.services[name];
+        let proc = RunningService::spawn(name, spec, self.sender.clone()).unwrap();
+        eprintln!("[~sulaco] service started {} (pid={})", proc.name, proc.pid);
+        self.ptable.insert(proc.pid, proc);
+    }
+
     pub async fn terminated(&mut self, term: Termination) {
         if let Some(proc) = self.ptable.remove(&term.pid()) {
+            eprintln!("[~sulaco] service terminated {} (pid={})", proc.name, term.pid());
             let spec = &self.conf.services[&proc.name];
-            if !self.shutdown {
-                tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                let proc = RunningService::spawn(&proc.name, spec, self.sender.clone()).unwrap();
-                self.ptable.insert(proc.pid, proc);
+            if !self.shutdown && spec.restart {
+                let sender = self.sender.clone();
+                let name = proc.name.clone();
+                let restart_delay = spec.restart_delay;
+                tokio::spawn(async move {
+                    tokio::time::sleep(restart_delay).await;
+                    let _ = sender.send(Event::ServiceRestart { name }).await;
+                });
             }
+        } else {
+            eprintln!("[~sulaco] zombie reaped {:?}", term.pid());
         }
     }
 
-    pub fn force_terminate(&self, pid: u32) {
-        self.ptable[&pid].force_terminate();
+    pub fn force_terminate(&self, pid: u32, instance_id: u64) {
+        let proc = &self.ptable[&pid];
+        if proc.instance_id == instance_id {
+            proc.force_terminate();
+        }
     }
 
     pub fn shutdown(&mut self) {
+        eprintln!("[~sulaco] term signal received, shutting down...");
         self.shutdown = true;
-        for service in self.ptable.values() {
-            service.terminate(Duration::from_secs(5));
+        for proc in self.ptable.values() {
+            let spec = &self.conf.services[&proc.name];
+            proc.terminate(spec.stop_timeout, spec.stop_signal);
         }
     }
 
@@ -178,15 +196,16 @@ async fn main() -> anyhow::Result<()> {
 
         match event {
             Event::TermSignal => {
-                eprintln!("[~sulaco] term signal received, shutting down...");
                 state.shutdown();
             }
+            Event::ServiceRestart { name } => {
+                state.start_service(&name);
+            }
             Event::ServiceTerminated(term) => {
-                eprintln!("[~sulaco] service terminated {:?}", term.pid());
                 state.terminated(term).await;
             }
-            Event::ServiceForceShutdown(pid) => {
-                state.force_terminate(pid);
+            Event::ServiceForceShutdown { pid, instance_id } => {
+                state.force_terminate(pid, instance_id);
             }
         }
     }
@@ -209,23 +228,15 @@ async fn listen_sigchld(sender: mpsc::Sender<Event>) {
         // that multiple children have exited for a single signal reception.
         // We stop looking for exited children when waitpid returns an error
         // or 0, signaling it would hang.
-        while let Ok(status) = nix::sys::wait::waitpid(None, Some(nix::sys::wait::WaitPidFlag::WNOHANG)) {
-            let term = match status {
-                nix::sys::wait::WaitStatus::Exited(pid, code) => Some(Termination::Exited {
-                    pid: pid.as_raw() as u32,
-                    code,
-                }),
-                nix::sys::wait::WaitStatus::Signaled(pid, signal, _) => Some(Termination::Signaled {
-                    pid: pid.as_raw() as u32,
-                    signal: signal as i32,
-                }),
-                _ => None,
-            };
-
-            if let Some(term) = term {
-                if sender.send(Event::ServiceTerminated(term)).await.is_err() {
-                    return;
+        loop {
+            match unix::wait_termination() {
+                unix::WaitTermination::Termination(term) => {
+                    if sender.send(Event::ServiceTerminated(term)).await.is_err() {
+                        return;
+                    }
                 }
+                unix::WaitTermination::Retry => continue,
+                unix::WaitTermination::Stop => break,
             }
         }
     }
