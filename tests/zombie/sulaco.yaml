@@ -1,0 +1,12 @@
+services:
+  main:
+    cmd: sleep
+    args: ["10"]
+    on_exit:
+      action: Shutdown
+  zombie_maker:
+    cmd: python
+    args: ["zombie_maker.py"]
+    on_exit:
+      action: Restart
+      restart_delay: 20

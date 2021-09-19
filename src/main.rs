@@ -88,7 +88,10 @@ impl RunningService {
     }
 
     pub fn terminate(&self, timeout: Duration, stop_signal: unix::Signal) {
-        eprintln!("[~sulaco] sending {} to {} (pid={})", stop_signal, self.name, self.pid);
+        eprintln!(
+            "[~sulaco] sending {} to [{}] (pid={})",
+            stop_signal, self.name, self.pid
+        );
         unix::kill(self.pid, stop_signal);
 
         let sender = self.sender.clone();
@@ -101,7 +104,7 @@ impl RunningService {
     }
 
     pub fn force_terminate(&self) {
-        eprintln!("[~sulaco] sending SIGKILL to {} (pid={})", self.name, self.pid);
+        eprintln!("[~sulaco] sending SIGKILL to [{}] (pid={})", self.name, self.pid);
         unix::kill(self.pid, unix::Signal::Sigkill);
     }
 }
@@ -136,7 +139,7 @@ impl AppState {
 
     pub async fn terminated(&mut self, term: Termination) {
         if let Some(proc) = self.ptable.remove(&term.pid()) {
-            eprintln!("[~sulaco] service terminated {} (pid={})", proc.name, term.pid());
+            eprintln!("[~sulaco] service [{}] (pid={}) terminated", proc.name, term.pid());
             let spec = &self.conf.services[&proc.name];
             if !self.shutdown {
                 match spec.on_exit {
@@ -149,13 +152,13 @@ impl AppState {
                         });
                     }
                     spec::OnExit::Shutdown => {
-                        eprintln!("[~sulaco] service configured to shutdown container {}", proc.name);
+                        eprintln!("[~sulaco] service [{}] configured to shutdown container ", proc.name);
                         self.shutdown();
                     }
                 }
             }
         } else {
-            eprintln!("[~sulaco] zombie reaped {:?}", term.pid());
+            eprintln!("[~sulaco] zombie reaped (pid={})", term.pid());
         }
     }
 
@@ -181,12 +184,14 @@ impl AppState {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    let args: Vec<String> = std::env::args().collect();
+
     let (sender, mut receiver) = tokio::sync::mpsc::channel(32);
     tokio::spawn(listen_sigchld(sender.clone()));
     tokio::spawn(handle_signal(sender.clone(), SignalKind::interrupt()));
     tokio::spawn(handle_signal(sender.clone(), SignalKind::terminate()));
 
-    let conf = spec::ConfigFile::load("sulaco.yaml").context("could not load config file")?;
+    let conf = spec::ConfigFile::load(&args[1]).context("could not load config file")?;
 
     let mut state = AppState {
         conf,

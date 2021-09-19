@@ -10,7 +10,7 @@ use serde::Deserialize;
 use crate::unix::Signal;
 
 #[derive(Debug, Deserialize)]
-#[serde(tag = "type")]
+#[serde(tag = "action")]
 pub enum OnExit {
     Restart {
         #[serde(default = "defaults::restart_delay")]
