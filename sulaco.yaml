@@ -1,8 +1,14 @@
 services:
   echoer:
-    cmd: sleep
-    args: ["5"]
+    cmd: sh
+    args:
+      - -c
+      - echo hello && sleep 2
+    on_exit:
+      type: Shutdown
   echoer2:
-    cmd: echo
-    args: [hello, world, "!!!"]
-    restart: false
+    cmd: sleep
+    args: ["10"]
+    on_exit:
+      type: Restart
+      restart_delay: 1

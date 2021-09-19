@@ -10,6 +10,16 @@ use serde::Deserialize;
 use crate::unix::Signal;
 
 #[derive(Debug, Deserialize)]
+#[serde(tag = "type")]
+pub enum OnExit {
+    Restart {
+        #[serde(default = "defaults::restart_delay")]
+        restart_delay: u64,
+    },
+    Shutdown,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct ConfigFile {
     /// Map of service name to service spec.
     pub services: HashMap<Arc<String>, ServiceSpec>,
@@ -39,13 +49,8 @@ pub struct ServiceSpec {
     #[serde(default = "defaults::stop_signal")]
     pub stop_signal: Signal,
 
-    /// Restart service
-    #[serde(default = "defaults::restart")]
-    pub restart: bool,
-
-    /// Delay before restarting service
-    #[serde(default = "defaults::restart_delay")]
-    pub restart_delay: Duration,
+    #[serde(default = "defaults::on_exit")]
+    pub on_exit: OnExit,
 }
 
 impl ConfigFile {
@@ -62,6 +67,8 @@ mod defaults {
 
     use crate::unix::Signal;
 
+    use super::OnExit;
+
     pub fn stop_timeout() -> Duration {
         Duration::from_secs(10)
     }
@@ -70,11 +77,13 @@ mod defaults {
         Signal::Sigint
     }
 
-    pub fn restart() -> bool {
-        true
+    pub fn on_exit() -> OnExit {
+        OnExit::Restart {
+            restart_delay: restart_delay(),
+        }
     }
 
-    pub fn restart_delay() -> Duration {
-        Duration::from_secs(1)
+    pub fn restart_delay() -> u64 {
+        0
     }
 }

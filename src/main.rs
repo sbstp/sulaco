@@ -138,14 +138,21 @@ impl AppState {
         if let Some(proc) = self.ptable.remove(&term.pid()) {
             eprintln!("[~sulaco] service terminated {} (pid={})", proc.name, term.pid());
             let spec = &self.conf.services[&proc.name];
-            if !self.shutdown && spec.restart {
-                let sender = self.sender.clone();
-                let name = proc.name.clone();
-                let restart_delay = spec.restart_delay;
-                tokio::spawn(async move {
-                    tokio::time::sleep(restart_delay).await;
-                    let _ = sender.send(Event::ServiceRestart { name }).await;
-                });
+            if !self.shutdown {
+                match spec.on_exit {
+                    spec::OnExit::Restart { restart_delay } => {
+                        let sender = self.sender.clone();
+                        let name = proc.name.clone();
+                        tokio::spawn(async move {
+                            tokio::time::sleep(Duration::from_secs(restart_delay)).await;
+                            let _ = sender.send(Event::ServiceRestart { name }).await;
+                        });
+                    }
+                    spec::OnExit::Shutdown => {
+                        eprintln!("[~sulaco] service configured to shutdown container {}", proc.name);
+                        self.shutdown();
+                    }
+                }
             }
         } else {
             eprintln!("[~sulaco] zombie reaped {:?}", term.pid());
@@ -160,7 +167,6 @@ impl AppState {
     }
 
     pub fn shutdown(&mut self) {
-        eprintln!("[~sulaco] term signal received, shutting down...");
         self.shutdown = true;
         for proc in self.ptable.values() {
             let spec = &self.conf.services[&proc.name];
@@ -196,6 +202,7 @@ async fn main() -> anyhow::Result<()> {
 
         match event {
             Event::TermSignal => {
+                eprintln!("[~sulaco] term signal received, shutting down...");
                 state.shutdown();
             }
             Event::ServiceRestart { name } => {
@@ -244,7 +251,7 @@ async fn listen_sigchld(sender: mpsc::Sender<Event>) {
 
 async fn handle_signal(sender: mpsc::Sender<Event>, sig: SignalKind) {
     let mut signals = signal(sig).unwrap();
-    while let Some(_) = signals.recv().await {
+    while signals.recv().await.is_some() {
         if sender.send(Event::TermSignal).await.is_err() {
             break;
         }
