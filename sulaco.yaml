@@ -3,12 +3,16 @@ services:
     cmd: sh
     args:
       - -c
-      - echo hello && sleep 2
+      - |
+        echo hello
+        sleep 5
+        echo hey
+        sleep 4
     on_exit:
-      type: Shutdown
+      action: Shutdown
   echoer2:
     cmd: sleep
     args: ["10"]
     on_exit:
-      type: Restart
+      action: Restart
       restart_delay: 1
