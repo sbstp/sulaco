@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Deserialize;
@@ -23,10 +22,10 @@ pub enum OnExit {
 pub struct ConfigFile {
     /// Map of init name to init spec.
     #[serde(default = "HashMap::new")]
-    pub init: HashMap<Arc<String>, InitSpec>,
+    pub init: HashMap<String, InitSpec>,
 
     /// Map of service name to service spec.
-    pub services: HashMap<Arc<String>, ServiceSpec>,
+    pub services: HashMap<String, ServiceSpec>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -40,7 +40,7 @@ impl BaseState {
 
 pub struct InitsState {
     base: BaseState,
-    done: BTreeSet<Arc<String>>,
+    done: BTreeSet<String>,
 }
 
 impl InitsState {
@@ -94,13 +94,13 @@ pub struct ServicesState {
 
 impl ServicesState {
     pub fn start_all(&mut self) {
-        let names: Vec<Arc<String>> = self.base.conf.services.keys().cloned().collect();
+        let names: Vec<String> = self.base.conf.services.keys().cloned().collect();
         for name in names {
             self.start(&name);
         }
     }
 
-    pub fn start(&mut self, name: &Arc<String>) {
+    pub fn start(&mut self, name: &str) {
         let spec = &self.base.conf.services[name];
         let mut cmd = process::Command::new(&spec.cmd);
         cmd.args(&spec.args);

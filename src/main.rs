@@ -15,8 +15,8 @@ mod unix;
 #[derive(Debug)]
 pub enum Event {
     ForceShutdown { pid: u32, instance_id: u64 },
-    ProcessTerminated(Termination),
-    ServiceRestart { name: Arc<String> },
+    ProcessTerminated { term: Termination },
+    ServiceRestart { name: String },
     Shutdown,
     TermSignal,
 }
@@ -45,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
         let event = receiver.recv().await.expect("event channel closed unexpectedly");
 
         match event {
-            Event::ProcessTerminated(term) => {
+            Event::ProcessTerminated { term } => {
                 if state.inits.owns_pid(term.pid()) {
                     state.inits.terminated(term);
                     if !conf.init.is_empty() && state.inits.all_done() && !state.shutdown {
@@ -96,7 +96,7 @@ async fn listen_sigchld(sender: mpsc::Sender<Event>) {
         loop {
             match unix::wait_termination() {
                 unix::WaitTermination::Termination(term) => {
-                    if sender.send(Event::ProcessTerminated(term)).await.is_err() {
+                    if sender.send(Event::ProcessTerminated { term }).await.is_err() {
                         return;
                     }
                 }

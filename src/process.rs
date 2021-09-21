@@ -1,5 +1,4 @@
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncRead};
@@ -15,7 +14,7 @@ enum StdStream {
 }
 
 pub struct RunningProcess {
-    pub name: Arc<String>,
+    pub name: String,
     pub handle: process::Child,
     pub pid: u32,
     pub instance_id: u64,
@@ -23,11 +22,7 @@ pub struct RunningProcess {
 }
 
 impl RunningProcess {
-    pub fn spawn(
-        name: &Arc<String>,
-        sender: mpsc::Sender<Event>,
-        mut cmd: process::Command,
-    ) -> anyhow::Result<RunningProcess> {
+    pub fn spawn(name: &str, sender: mpsc::Sender<Event>, mut cmd: process::Command) -> anyhow::Result<RunningProcess> {
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
         unsafe {
@@ -42,13 +37,13 @@ impl RunningProcess {
         let stdout = child.stdout.take().expect("stdout not piped");
         let stderr = child.stderr.take().expect("stderr not piped");
 
-        tokio::spawn(Self::stream_stdio(name.clone(), stdout, StdStream::Stdout));
-        tokio::spawn(Self::stream_stdio(name.clone(), stderr, StdStream::Stderr));
+        tokio::spawn(Self::stream_stdio(name.to_string(), stdout, StdStream::Stdout));
+        tokio::spawn(Self::stream_stdio(name.to_string(), stderr, StdStream::Stderr));
 
         let pid = child.id().expect("child has no pid");
 
         Ok(RunningProcess {
-            name: name.clone(),
+            name: name.to_string(),
             handle: child,
             pid,
             instance_id: Self::next_instance_id(),
@@ -61,7 +56,7 @@ impl RunningProcess {
         INSTANCE_ID_COUNTER.fetch_add(1, Ordering::SeqCst)
     }
 
-    async fn stream_stdio(tag: Arc<String>, reader: impl AsyncRead + Unpin, stream: StdStream) {
+    async fn stream_stdio(tag: String, reader: impl AsyncRead + Unpin, stream: StdStream) {
         let br = tokio::io::BufReader::new(reader);
         let mut lines = br.lines();
         while let Ok(Some(line)) = lines.next_line().await {
