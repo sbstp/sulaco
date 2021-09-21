@@ -21,8 +21,37 @@ pub enum OnExit {
 
 #[derive(Debug, Deserialize)]
 pub struct ConfigFile {
+    /// Map of init name to init spec.
+    #[serde(default = "HashMap::new")]
+    pub init: HashMap<Arc<String>, InitSpec>,
+
     /// Map of service name to service spec.
     pub services: HashMap<Arc<String>, ServiceSpec>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct InitSpec {
+    /// Path to service binary
+    pub cmd: String,
+
+    /// Arguments
+    #[serde(default)]
+    pub args: Vec<String>,
+
+    /// Additional environment variables for this service.
+    #[serde(default)]
+    pub env: HashMap<String, String>,
+
+    /// Working directory of service
+    pub workdir: Option<String>,
+
+    /// Timeout before sending SIGKILL
+    #[serde(default = "defaults::stop_timeout")]
+    pub stop_timeout: Duration,
+
+    /// Signal to send to terminate service
+    #[serde(default = "defaults::stop_signal")]
+    pub stop_signal: Signal,
 }
 
 #[derive(Debug, Deserialize)]
@@ -49,6 +78,7 @@ pub struct ServiceSpec {
     #[serde(default = "defaults::stop_signal")]
     pub stop_signal: Signal,
 
+    /// How to handle this service exiting.
     #[serde(default = "defaults::on_exit")]
     pub on_exit: OnExit,
 }

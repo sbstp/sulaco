@@ -38,7 +38,7 @@ impl Display for Signal {
 }
 
 pub fn kill(pid: u32, signal: Signal) {
-    let _ = signal::kill(Pid::from_raw(pid as i32), signal.to_nix());
+    let _ = signal::kill(Pid::from_raw(-(pid as i32)), signal.to_nix());
 }
 
 #[derive(Debug)]

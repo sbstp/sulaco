@@ -1,18 +1,21 @@
+init:
+  initdb:
+    cmd: sleep
+    args:
+      - "2"
 services:
   echoer:
     cmd: sh
     args:
       - -c
       - |
-        echo hello
-        sleep 5
-        echo hey
-        sleep 4
+        echo hello 1
+        sleep 10
     on_exit:
       action: Shutdown
   echoer2:
-    cmd: sleep
-    args: ["10"]
+    cmd: echo
+    args: ["hello 2"]
     on_exit:
       action: Restart
       restart_delay: 1
