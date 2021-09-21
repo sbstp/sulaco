@@ -183,6 +183,6 @@ impl AppState {
     }
 
     pub fn should_exit(&self) -> bool {
-        self.inits.base.ptable.is_empty() && self.services.base.ptable.is_empty()
+        self.shutdown && self.inits.base.ptable.is_empty() && self.services.base.ptable.is_empty()
     }
 }
